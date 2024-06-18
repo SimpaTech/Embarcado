@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <time.h>
 #include <HTTPClient.h>
+#include "Grove_Temperature_And_Humidity_Sensor.h"
 
 // Variáveis WiFi e NTP
 String uid;
@@ -13,12 +14,17 @@ time_t now;
 struct tm timeinfo;
 String serverName = "http://IPMaquina:4000/mongodb/salvarMedida";
 
+// Definições de pinos e tipos dos sensores
+#define DHTTYPE DHT11
+#define LUMINOSIDADEPIN 4
+#define DHTPIN 14
+
+DHT dht(DHTPIN, DHTTYPE); 
+
 // Variáveis para tasks e semáforos
 TaskHandle_t task1;
 TaskHandle_t task2;
 SemaphoreHandle_t mutex;
-float temp = 12.0;
-float umi = 27.0;
 
 // Função para conectar ao WiFi
 void connectWiFi() {
@@ -36,7 +42,7 @@ void connectWiFi() {
 // Função para verificar a conectividade com o servidor
 bool isServerAvailable() {
   WiFiClient client;
-  if (client.connect("192.168.1.139", 4000)) {
+  if (client.connect("IPMaquina", 4000)) {
     client.stop();
     return true;
   }
@@ -87,33 +93,43 @@ void sendData(String payload) {
   }
 }
 
-// Task 1 para atualizar e enviar temperatura e/ou umidade aleatoriamente
+// Task 1 para atualizar e enviar temperatura e umidade
 void minhaTask1(void *pvParameters) {
   Serial.println("Começou a Task1");
   while (true) {
     // Região crítica
     xSemaphoreTake(mutex, portMAX_DELAY);
-    temp = temp + 0.24;
-    umi = umi + 0.23;
-    float currentTemp = temp;
-    float currentUmi = umi;
+    float temp_hum_val[2] = {0};
+    if (!dht.readTempAndHumidity(temp_hum_val)) {
+      float temp = temp_hum_val[1];
+      float umi = temp_hum_val[0];
+    } else {
+      Serial.println("Falha ao ler temperatura e umidade.");
+    }
     xSemaphoreGive(mutex);
 
-    int choice = random(3); // Gera um número aleatório entre 0 e 2
+    String payload = "{\"uid\":\"" + uid + "\",\"unixtime\":" + String(now) + ",\"Temp\":" + String(temp) + ",\"Umidade\":" + String(umi) + "}";
+    sendData(payload);
 
-    if (choice == 0) {
-      // Enviar apenas temperatura
-      String payload = "{\"uid\":\"" + uid + "\",\"unixtime\":" + String(now) + ",\"Temp\":" + String(currentTemp) + "}";
-      sendData(payload);
-    } else if (choice == 1) {
-      // Enviar apenas umidade
-      String payload = "{\"uid\":\"" + uid + "\",\"unixtime\":" + String(now) + ",\"Umidade\":" + String(currentUmi) + "}";
-      sendData(payload);
-    } else {
-      // Enviar ambos
-      String payload = "{\"uid\":\"" + uid + "\",\"unixtime\":" + String(now) + ",\"Temp\":" + String(currentTemp) + ",\"Umidade\":" + String(currentUmi) + "}";
-      sendData(payload);
-    }
+    delay(10000); // Delay de 10 segundos entre envios
+  }
+}
+
+// Task 2 para atualizar e enviar luminosidade
+void minhaTask2(void *pvParameters) {
+  Serial.println("Começou a Task2");
+  while (true) {
+    // Região crítica
+    xSemaphoreTake(mutex, portMAX_DELAY);
+    analogReadResolution(10);
+    float volts = analogRead(LUMINOSIDADEPIN) * 5 / 1024.0;
+    float amps = volts / 10000.0;
+    float microamps = amps * 1000000;
+    float lux = microamps * 2.0;
+    xSemaphoreGive(mutex);
+
+    String payload = "{\"uid\":\"" + uid + "\",\"unixtime\":" + String(now) + ",\"Luminosidade\":" + String(lux) + "}";
+    sendData(payload);
 
     delay(10000); // Delay de 10 segundos entre envios
   }
@@ -134,12 +150,15 @@ void setup() {
     Serial.println(now);
   }
 
+  // Inicializa o sensor DHT
+  dht.begin();
+  
   // Criação do semáforo
   mutex = xSemaphoreCreateMutex();
   if (mutex == NULL)
     Serial.println("Erro ao criar o mutex");
 
-  // Criação da task com tamanho de pilha aumentado
+  // Criação das tasks com tamanho de pilha aumentado
   Serial.println("Criando a task 1");
   xTaskCreatePinnedToCore(
     minhaTask1, // função da task
@@ -150,15 +169,28 @@ void setup() {
     &task1, // task handle
     0 // core (loop = 0)
   );
+
+  Serial.println("Criando a task 2");
+  xTaskCreatePinnedToCore(
+    minhaTask2, // função da task
+    "MinhaTask2", // nome da task
+    2048, // tamanho da task (aumentado)
+    NULL, // parâmetros task
+    1, // prioridade da task
+    &task2, // task handle
+    1 // core (loop = 1)
+  );
 }
 
 void loop() {
   // Região crítica para leitura segura dos dados para debug
   xSemaphoreTake(mutex, portMAX_DELAY);
-  Serial.print("Temperatura ");
+  Serial.print("Temperatura: ");
   Serial.println(temp);
-  Serial.print("Umidade ");
+  Serial.print("Umidade: ");
   Serial.println(umi);
+  Serial.print("Luminosidade: ");
+  Serial.println(lux);
   xSemaphoreGive(mutex);
 
   delay(5000);
